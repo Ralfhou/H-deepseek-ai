@@ -1,0 +1,15 @@
+[theme]
+# 主色调（按钮、滑块的颜色）：DeepSeek 蓝紫色
+primaryColor = "#6C63FF"
+
+# 背景颜色：深空灰
+backgroundColor = "#0E1117"
+
+# 侧边栏背景色：稍微浅一点的灰
+secondaryBackgroundColor = "#262730"
+
+# 文字颜色：纯白
+textColor = "#FAFAFA"
+
+# 字体：无衬线字体，看起来更现代
+font = "sans serif"
