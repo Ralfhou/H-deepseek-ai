@@ -1,6 +1,4 @@
 streamlit
 openai
-PyPDF2
-python-docx
+duckduckgo-search
 pandas
-openpyxl
