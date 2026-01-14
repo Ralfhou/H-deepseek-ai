@@ -1,163 +1,154 @@
 import streamlit as st
 from openai import OpenAI
-import PyPDF2
-from docx import Document
-import pandas as pd  # 👈 新增：这是专门处理 Excel/数据的库
+import json  # 👈 必须要有这个
 
+# ==========================================
 # 1. 页面配置
-st.set_page_config(page_title="DeepSeek 知识库 Pro", page_icon="🧠", layout="wide")
-
-# 初始化 session state
-if "messages" not in st.session_state:
-    st.session_state.messages = []
+# ==========================================
+st.set_page_config(
+    page_title="DeepSeek 审计仪表盘",
+    page_icon="📊",
+    layout="wide"  # 宽屏模式，看数据更爽
+)
 
 # ==========================================
-# 2. 定义万能读取函数 (支持 PDF/Word/Txt/Excel)
+# 2. 获取 API Key (从保险箱取)
 # ==========================================
-def read_files(uploaded_files):
-    all_content = ""
-    file_summary = []  # 用来记录读了哪些文件
-    
-    for file in uploaded_files:
-        try:
-            content = ""
-            # A. 处理 PDF
-            if file.name.endswith(".pdf"):
-                reader = PyPDF2.PdfReader(file)
-                for page in reader.pages:
-                    content += page.extract_text() + "\n"
-            
-            # B. 处理 Word
-            elif file.name.endswith(".docx"):
-                doc = Document(file)
-                for para in doc.paragraphs:
-                    content += para.text + "\n"
-            
-            # C. 处理 TXT
-            elif file.name.endswith(".txt"):
-                content = file.read().decode("utf-8")
-            
-            # D. 处理 Excel (新功能!)
-            elif file.name.endswith(".xlsx") or file.name.endswith(".xls"):
-                # 读取 Excel 为表格数据
-                df = pd.read_excel(file)
-                # 把表格转成文字描述，喂给 AI
-                content = df.to_markdown(index=False)
-                # 在网页侧边栏显示一下表格预览，看起来很酷
-                with st.sidebar.expander(f"📊 {file.name} 预览"):
-                    st.dataframe(df)
+api_key = st.secrets.get("DEEPSEEK_API_KEY")
+if not api_key:
+    st.error("❌ 未检测到 API Key，请在 Streamlit Secrets 中配置！")
+    st.stop()
 
-            # 把单个文件内容打包
-            if content:
-                all_content += f"\n--- 文件名：{file.name} ---\n{content}\n"
-                file_summary.append(file.name)
-                
-        except Exception as e:
-            st.sidebar.error(f"❌ 读取 {file.name} 失败: {str(e)}")
-            
-    return all_content, file_summary
+client = OpenAI(
+    api_key=api_key,
+    base_url="https://api.deepseek.com",
+)
 
 # ==========================================
-# 3. 侧边栏：控制台
+# 3. 侧边栏：上传区
 # ==========================================
 with st.sidebar:
-    st.title("🎛️ 知识库控制台")
-    
-    # 创造力滑块
-    temperature = st.slider("🧠 思考发散度", 0.0, 1.3, 0.7, 0.1)
-    
-    st.divider()
-    
-    # 📂 多文件上传区 (注意：accept_multiple_files=True)
-    st.subheader("📂 投喂文档 (支持多选)")
+    st.header("📂 文件投喂")
     uploaded_files = st.file_uploader(
-        "按住 Ctrl 可多选文件 (PDF/Word/Excel/Txt)", 
-        type=["pdf", "docx", "txt", "xlsx", "xls"],
-        accept_multiple_files=True 
+        "请上传合同/文档 (TXT)", 
+        type=["txt"], 
+        accept_multiple_files=True
     )
     
-    # 处理文件逻辑
-    files_text = ""
-    if uploaded_files:
-        files_text, file_names = read_files(uploaded_files)
-        if files_text:
-            st.success(f"✅ 已加载 {len(uploaded_files)} 个文件")
-            st.caption(f"包含: {', '.join(file_names)}")
-    
     st.divider()
     
-    # 清空和下载
-    if st.button("🗑️ 清空所有对话"):
+    # 清空历史按钮
+    if st.button("🗑️ 清空分析记录"):
         st.session_state.messages = []
         if "last_files" in st.session_state:
             del st.session_state["last_files"]
         st.rerun()
 
-    chat_str = "\n".join([f"{m['role']}: {m['content']}" for m in st.session_state.messages])
-    st.download_button("📥 导出对话记录", chat_str, "chat_history.txt")
+# 初始化 session_state
+if "messages" not in st.session_state:
+    st.session_state.messages = []
 
 # ==========================================
-# 4. API 客户端 (从保险箱取 Key)
+# 4. 核心逻辑：Level 2 JSON 结构化提取
 # ==========================================
-client = OpenAI(
-    api_key=st.secrets["DEEPSEEK_API_KEY"], 
-    base_url="https://api.deepseek.com"
-)
+st.title("📊 DeepSeek 智能审计仪表盘")
+st.caption("Level 2: 结构化数据提取 (JSON Mode)")
 
-# ==========================================
-# 5. 主界面
-# ==========================================
-st.title("Hou DeepSeek 知识库 Pro")
-
-# 智能系统提示词注入
-# 只有当文件列表发生变化，或者第一次上传时，才向 AI 发送文件内容
+# 检测新文件
 current_file_names = [f.name for f in uploaded_files] if uploaded_files else []
 previous_file_names = st.session_state.get("last_files", [])
 
 if uploaded_files and current_file_names != previous_file_names:
-    # 记录这次的文件名，防止刷新时重复发送
     st.session_state.last_files = current_file_names
     
-    # 构造超级提示词
-    system_msg = {
-        "role": "system", 
-        "content": f"""你是一个智能知识库助手。用户上传了以下文件内容：
-{files_text}
+    # 读取文件内容
+    files_text = ""
+    for file in uploaded_files:
+        content = file.read().decode("utf-8")
+        files_text += f"\n=== 文件名：{file.name} ===\n{content}\n"
 
-请根据以上文件内容，准确回答用户的问题。如果问题超出文件范围，请利用你的通用知识回答。"""
-    }
+    # 🧠 JSON 专用 Prompt (核心中的核心)
+    system_prompt_content = f"""
+    # Role
+    你是一个严谨的数据提取算法。你的任务是从用户上传的文档中提取关键信息，并严格以 JSON 格式输出。
+
+    # Context
+    用户上传了以下文档内容：
+    {files_text}
+
+    # Goals
+    请提取以下字段：
+    1. "risk_score": 风险评分 (0-100的整数，100为最高危)
+    2. "risk_level": 风险等级 (字符串：高/中/低)
+    3. "entity_name": 甲方/乙方的公司名称 (如果没找到写 "未知")
+    4. "summary": 一句话总结 (不超过 20 字)
+
+    # Constraint (绝对限制)
+    1. **只输出 JSON**。
+    2. 不要包含 markdown 格式（如 ```json ... ```）。
+    3. 不要任何开场白或结束语。
+    4. 确保 JSON 格式合法。
+    """
+
+    # 构造消息历史
+    st.session_state.messages = [{"role": "system", "content": system_prompt_content}]
+    st.session_state.messages.append({"role": "user", "content": "开始提取数据"})
+
+    # 直接调用 AI (Loading 转圈圈)
+    with st.spinner("🤖 正在进行数据结构化提取..."):
+        try:
+            response = client.chat.completions.create(
+                model="deepseek-chat",
+                messages=st.session_state.messages,
+                temperature=0.1,  # 低温，保证数据严谨
+                stream=False      # JSON 模式不需要流式输出
+            )
+            result_text = response.choices[0].message.content.strip()
+            
+            # 🧹 清洗数据 (防止 AI 偶尔加 markdown 符号)
+            if result_text.startswith("```json"):
+                result_text = result_text[7:]
+            if result_text.endswith("```"):
+                result_text = result_text[:-3]
+            
+            # 🔓 解析 JSON
+            data = json.loads(result_text)
+            
+            # 🎉 成功！存储数据到 session 以便显示
+            st.session_state.analysis_result = data
+            st.success("✅ 数据提取成功！")
+            
+        except json.JSONDecodeError:
+            st.error("❌ JSON 解析失败，AI 可能说了废话。请重试。")
+            st.warning(f"原始回复: {result_text}")
+        except Exception as e:
+            st.error(f"❌ 发生错误: {e}")
+
+# ==========================================
+# 5. 结果展示区 (Dashboard)
+# ==========================================
+if "analysis_result" in st.session_state:
+    data = st.session_state.analysis_result
     
-    # 插入到对话开头
-    st.session_state.messages.insert(0, system_msg)
-    # 它是 AI，给个面子让它打个招呼
-    st.session_state.messages.append({
-        "role": "assistant", 
-        "content": f"📚 我已阅读完以下文件：\n- " + "\n- ".join(current_file_names) + "\n\n请问我想了解什么？（比如让我是分析数据，或者对比文档）"
-    })
-
-# 移除文件后的清理
-if not uploaded_files and "last_files" in st.session_state:
-    del st.session_state["last_files"]
-
-# 渲染历史消息
-for msg in st.session_state.messages:
-    if msg["role"] != "system":
-        with st.chat_message(msg["role"]):
-            st.markdown(msg["content"])
-
-# 处理输入
-if user_input := st.chat_input("输入问题..."):
-    with st.chat_message("user"):
-        st.markdown(user_input)
-    st.session_state.messages.append({"role": "user", "content": user_input})
-
-    with st.chat_message("assistant"):
-        stream = client.chat.completions.create(
-            model="deepseek-chat",
-            messages=st.session_state.messages,
-            stream=True,
-            temperature=temperature
+    # 🎨 展示漂亮的指标卡片
+    st.divider()
+    col1, col2, col3 = st.columns(3)
+    
+    with col1:
+        st.metric(
+            label="🔮 风险评分", 
+            value=f"{data['risk_score']} 分", 
+            delta="-高危" if data['risk_score'] > 80 else "安全"
         )
-        response = st.write_stream(stream)
     
-    st.session_state.messages.append({"role": "assistant", "content": response})
+    with col2:
+        st.metric(label="💣 风险等级", value=data['risk_level'])
+        
+    with col3:
+        st.metric(label="🏢 公司名称", value=data['entity_name'])
+
+    st.info(f"📝 **总结**：{data['summary']}")
+
+    # 🕵️‍♂️ 给程序员看的原始数据
+    with st.expander("🔍 查看原始 JSON 数据"):
+        st.json(data)
