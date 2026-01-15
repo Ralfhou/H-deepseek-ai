@@ -1,132 +1,115 @@
 import streamlit as st
 from openai import OpenAI
-from duckduckgo_search import DDGS  # 👈 新武器：联网搜索工具
+from tavily import TavilyClient # 👈 换成专业搜索客户端
 import time
 
 # ==========================================
 # 1. 基础配置
 # ==========================================
-st.set_page_config(page_title="DeepSeek 全网情报局", page_icon="🌍", layout="wide")
+st.set_page_config(page_title="DeepSeek 全网情报局 (Pro)", page_icon="📡", layout="wide")
 
-api_key = st.secrets.get("DEEPSEEK_API_KEY")
-if not api_key:
-    st.error("❌ 请配置 API Key")
+# 获取 DeepSeek Key
+deepseek_key = st.secrets.get("DEEPSEEK_API_KEY")
+# 获取 Tavily Key (搜索专用)
+tavily_key = st.secrets.get("TAVILY_API_KEY")
+
+if not deepseek_key or not tavily_key:
+    st.error("❌ 缺少 API Key，请在 Secrets 中配置 DEEPSEEK_API_KEY 和 TAVILY_API_KEY")
     st.stop()
 
-client = OpenAI(api_key=api_key, base_url="https://api.deepseek.com")
+# 初始化客户端
+client = OpenAI(api_key=deepseek_key, base_url="https://api.deepseek.com")
+tavily_client = TavilyClient(api_key=tavily_key)
 
 # ==========================================
 # 2. 侧边栏
 # ==========================================
 with st.sidebar:
-    st.header("🌍 情报控制台")
-    st.markdown("这里是你的私人 AI 情报员。输入关键词，我来帮你跑腿。")
+    st.header("📡 Pro 版情报控制台")
+    st.caption("Powered by Tavily (Enterprise Search)")
     
-    # 搜索条数控制
-    max_results = st.slider("搜索文章数量", 5, 20, 10)
+    # 搜索深度选择
+    search_depth = st.radio("搜索模式", ["basic (快速)", "advanced (深度)"], index=0)
+    depth_val = "basic" if "basic" in search_depth else "advanced"
     
     if st.button("🗑️ 清空情报"):
         st.session_state.messages = []
-        if "report" in st.session_state:
-            del st.session_state["report"]
         st.rerun()
 
 # ==========================================
-# 3. 核心功能：联网搜索函数
+# 3. 主界面逻辑
 # ==========================================
-def search_web(query, num_results=10):
-    """ 使用 DuckDuckGo 搜索网络信息 """
-    results = []
-    with DDGS() as ddgs:
-        # keywords: 关键词, max_results: 数量
-        search_gen = ddgs.text(query, max_results=num_results)
-        for r in search_gen:
-            results.append(r)
-    return results
+st.title("📡 DeepSeek 全网情报局 (Pro)")
+st.caption("Level 5: Enterprise Search Agent")
 
-# ==========================================
-# 4. 主界面逻辑
-# ==========================================
-st.title("🌍 DeepSeek AI 全网情报局")
-st.caption("Level 5: AI Search Agent (Real-time Web Access)")
-
-# 输入框
-user_query = st.chat_input("请输入你想调研的主题（例如：DeepSeek最新动态 / 2024 AI 发展趋势）...")
+user_query = st.chat_input("请输入调研主题（例如：DeepSeek vs OpenAI 评测）...")
 
 if user_query:
-    # A. 显示用户的指令
     st.chat_message("user").write(user_query)
     
-    # B. Agent 开始行动
     with st.chat_message("assistant"):
-        status_box = st.status("🕵️‍♂️ 情报员出动中...", expanded=True)
+        status_box = st.status("🕵️‍♂️ 特工出动中...", expanded=True)
         
-        # --- 第一步：联网搜索 ---
-        status_box.write(f"🔍 正在全网搜索：{user_query} ...")
+        # --- A. 联网搜索 (Tavily) ---
+        status_box.write(f"🔍 正在连接 Tavily 搜索网络：{user_query} ...")
         try:
-            # 执行搜索
-            search_data = search_web(user_query, max_results)
+            # Tavily 会自动把网页内容清洗成干净的文本
+            response = tavily_client.search(
+                query=user_query, 
+                search_depth=depth_val,
+                max_results=5 # 5篇精华通常足够
+            )
             
-            if not search_data:
-                status_box.update(label="❌ 搜索无结果", state="error")
+            search_results = response.get("results", [])
+            
+            if not search_results:
+                status_box.update(label="❌ 未找到相关信息", state="error")
                 st.stop()
                 
-            status_box.write(f"✅ 已抓取 {len(search_data)} 条相关情报，正在阅读...")
+            status_box.write(f"✅ 已获取 {len(search_results)} 份高价值情报，正在分析...")
             
-            # 将搜索结果拼接成文本，喂给 AI
+            # 拼接上下文
             context_text = ""
-            for idx, item in enumerate(search_data):
-                context_text += f"【来源 {idx+1}】标题：{item['title']}\n链接：{item['href']}\n摘要：{item['body']}\n\n"
+            for item in search_results:
+                context_text += f"【来源】{item['title']}\n链接：{item['url']}\n内容摘要：{item['content']}\n\n"
                 
         except Exception as e:
-            status_box.update(label="❌ 网络连接失败", state="error")
-            st.error(f"搜索报错: {e}")
+            status_box.update(label="❌ 搜索接口报错", state="error")
+            st.error(f"Tavily Error: {e}")
             st.stop()
 
-        # --- 第二步：AI 思考与总结 ---
-        status_box.write("🧠 正在整理情报并撰写报告...")
+        # --- B. AI 深度分析 ---
+        status_box.write("🧠 DeepSeek 正在撰写深度研报...")
         
         system_prompt = f"""
-        你是一个专业的情报分析师。你的任务是根据提供的互联网搜索结果，写一份深度的【情报简报】。
+        你是一名首席情报分析师。请基于以下搜索结果撰写报告。
         
-        要求：
-        1. 必须基于提供的【搜索结果】回答，不要瞎编。
-        2. 格式要求：
-           - 🏆 **核心结论**：一句话总结最重要的信息。
-           - 📝 **详细动态**：分点叙述，逻辑清晰。
-           - 🔗 **参考来源**：在文末列出关键链接。
-        3. 语言风格：专业、客观、精炼。
-        """
-        
-        user_prompt = f"""
-        用户调研主题：{user_query}
-        
-        搜索到的互联网情报：
+        搜索数据：
         {context_text}
         
-        请开始撰写报告：
+        要求：
+        1. 必须引用上述数据，严禁编造。
+        2. 使用 Markdown 格式。
+        3. 包含：【核心结论】、【详细动态分析】、【相关链接】。
         """
         
-        # 调用 DeepSeek
-        response = client.chat.completions.create(
+        # 流式输出
+        stream = client.chat.completions.create(
             model="deepseek-chat",
             messages=[
                 {"role": "system", "content": system_prompt},
-                {"role": "user", "content": user_prompt}
+                {"role": "user", "content": f"分析主题：{user_query}"}
             ],
-            stream=True  # 开启流式输出，看着更爽
+            stream=True
         )
         
-        # --- 第三步：流式输出报告 ---
-        status_box.update(label="✅ 报告生成完毕", state="complete", expanded=False)
+        status_box.update(label="✅ 研报生成完毕", state="complete", expanded=False)
         
-        # 实时打印文字
+        # 实时打印
         report_placeholder = st.empty()
-        full_report = ""
-        for chunk in response:
+        full_text = ""
+        for chunk in stream:
             if chunk.choices[0].delta.content:
-                content = chunk.choices[0].delta.content
-                full_report += content
-                report_placeholder.markdown(full_report + "▌")
-        
-        report_placeholder.markdown(full_report)
+                full_text += chunk.choices[0].delta.content
+                report_placeholder.markdown(full_text + "▌")
+        report_placeholder.markdown(full_text)
