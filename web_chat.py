@@ -1,115 +1,129 @@
 import streamlit as st
 from openai import OpenAI
-from tavily import TavilyClient # 👈 换成专业搜索客户端
-import time
+from tavily import TavilyClient
+import json
 
 # ==========================================
-# 1. 基础配置
+# 1. 配置区
 # ==========================================
-st.set_page_config(page_title="DeepSeek 全网情报局 (Pro)", page_icon="📡", layout="wide")
+st.set_page_config(page_title="Deep Research 深度研究员", page_icon="🧐", layout="wide")
 
-# 获取 DeepSeek Key
 deepseek_key = st.secrets.get("DEEPSEEK_API_KEY")
-# 获取 Tavily Key (搜索专用)
 tavily_key = st.secrets.get("TAVILY_API_KEY")
 
 if not deepseek_key or not tavily_key:
-    st.error("❌ 缺少 API Key，请在 Secrets 中配置 DEEPSEEK_API_KEY 和 TAVILY_API_KEY")
+    st.error("❌ 请检查 Secrets 配置！")
     st.stop()
 
-# 初始化客户端
 client = OpenAI(api_key=deepseek_key, base_url="https://api.deepseek.com")
-tavily_client = TavilyClient(api_key=tavily_key)
+tavily = TavilyClient(api_key=tavily_key)
 
 # ==========================================
-# 2. 侧边栏
+# 2. 定义 Workflow 的各个节点 (SOP)
+# ==========================================
+
+def step_1_plan(query):
+    """ 策划阶段：把大问题拆解成 3 个具体的搜索方向 """
+    prompt = f"""
+    你是一个专业的研究员。用户的目标是："{query}"。
+    请为了彻底调研这个问题，提出 3 个【互不重叠】的具体搜索关键词（Search Queries）。
+    
+    必须严格输出 JSON 格式，格式如下：
+    {{
+        "queries": ["关键词1", "关键词2", "关键词3"]
+    }}
+    """
+    response = client.chat.completions.create(
+        model="deepseek-chat",
+        messages=[{"role": "user", "content": prompt}],
+        response_format={"type": "json_object"} # 强制 JSON
+    )
+    return json.loads(response.choices[0].message.content)['queries']
+
+def step_2_search(queries):
+    """ 执行阶段：并行搜索所有方向 """
+    aggregated_content = ""
+    logs = []
+    
+    for q in queries:
+        # 使用 Tavily 的 search 功能
+        res = tavily.search(query=q, search_depth="advanced", max_results=3)
+        logs.append(f"🔍 已搜索：{q} (找到 {len(res['results'])} 条资料)")
+        
+        for item in res['results']:
+            aggregated_content += f"---资料来源：{item['url']}---\n"
+            aggregated_content += f"标题：{item['title']}\n"
+            aggregated_content += f"内容：{item['content']}\n\n"
+            
+    return aggregated_content, logs
+
+def step_3_write(query, context):
+    """ 写作阶段：基于海量资料写深度报告 """
+    prompt = f"""
+    你是一个资深行业分析师。请基于下方的【原始调研资料】，为用户撰写一份深度研究报告。
+    
+    用户课题：{query}
+    
+    要求：
+    1. **深度优先**：不要只写表面，要挖掘数据背后的逻辑。
+    2. **结构化**：使用 H2, H3 标题，列表，表格等 Markdown 格式。
+    3. **引用**：在文中适当位置标注信息来源（如 [来源1]）。
+    4. 字数要求：不少于 800 字。
+    
+    【原始调研资料】：
+    {context}
+    """
+    # 这里用流式输出
+    return client.chat.completions.create(
+        model="deepseek-chat",
+        messages=[{"role": "user", "content": prompt}],
+        stream=True
+    )
+
+# ==========================================
+# 3. 页面 UI (可视化 Workflow)
 # ==========================================
 with st.sidebar:
-    st.header("📡 Pro 版情报控制台")
-    st.caption("Powered by Tavily (Enterprise Search)")
-    
-    # 搜索深度选择
-    search_depth = st.radio("搜索模式", ["basic (快速)", "advanced (深度)"], index=0)
-    depth_val = "basic" if "basic" in search_depth else "advanced"
-    
-    if st.button("🗑️ 清空情报"):
+    st.header("🧐 深度研究 Workflow")
+    st.info("原理：拆解问题 -> 多维搜索 -> 交叉验证 -> 深度写作")
+    if st.button("🗑️ 清空屏幕"):
         st.session_state.messages = []
         st.rerun()
 
-# ==========================================
-# 3. 主界面逻辑
-# ==========================================
-st.title("📡 DeepSeek 全网情报局 (Pro)")
-st.caption("Level 5: Enterprise Search Agent")
+st.title("🧐 Deep Research 深度研究员")
+st.caption("Level 6: Autonomous Research Workflow")
 
-user_query = st.chat_input("请输入调研主题（例如：DeepSeek vs OpenAI 评测）...")
+user_input = st.chat_input("请输入一个值得深度研究的话题（例如：AI Agent 的未来商业模式）...")
 
-if user_query:
-    st.chat_message("user").write(user_query)
+if user_input:
+    st.chat_message("user").write(user_input)
     
     with st.chat_message("assistant"):
-        status_box = st.status("🕵️‍♂️ 特工出动中...", expanded=True)
-        
-        # --- A. 联网搜索 (Tavily) ---
-        status_box.write(f"🔍 正在连接 Tavily 搜索网络：{user_query} ...")
-        try:
-            # Tavily 会自动把网页内容清洗成干净的文本
-            response = tavily_client.search(
-                query=user_query, 
-                search_depth=depth_val,
-                max_results=5 # 5篇精华通常足够
-            )
+        # 创建一个状态容器，让用户看到 Workflow 正在跑
+        with st.status("🚀 启动深度研究工作流...", expanded=True) as status:
             
-            search_results = response.get("results", [])
+            # --- Step 1: 策划 ---
+            status.write("🧠 正在进行思维拆解 (Planning)...")
+            sub_queries = step_1_plan(user_input)
+            status.write(f"✅ 拆解为 3 个子方向：{sub_queries}")
             
-            if not search_results:
-                status_box.update(label="❌ 未找到相关信息", state="error")
-                st.stop()
-                
-            status_box.write(f"✅ 已获取 {len(search_results)} 份高价值情报，正在分析...")
+            # --- Step 2: 搜集 ---
+            status.write("🌍 正在全网并行搜集资料 (Data Mining)...")
+            raw_data, search_logs = step_2_search(sub_queries)
+            for log in search_logs:
+                status.write(log)
+            status.write(f"📦 共采集到 {len(raw_data)} 字符的原始情报。")
             
-            # 拼接上下文
-            context_text = ""
-            for item in search_results:
-                context_text += f"【来源】{item['title']}\n链接：{item['url']}\n内容摘要：{item['content']}\n\n"
-                
-        except Exception as e:
-            status_box.update(label="❌ 搜索接口报错", state="error")
-            st.error(f"Tavily Error: {e}")
-            st.stop()
+            # --- Step 3: 综合 ---
+            status.write("✍️ 正在进行交叉分析与写作 (Drafting)...")
+            status.update(label="✅ 深度报告生成完毕！", state="complete", expanded=False)
 
-        # --- B. AI 深度分析 ---
-        status_box.write("🧠 DeepSeek 正在撰写深度研报...")
-        
-        system_prompt = f"""
-        你是一名首席情报分析师。请基于以下搜索结果撰写报告。
-        
-        搜索数据：
-        {context_text}
-        
-        要求：
-        1. 必须引用上述数据，严禁编造。
-        2. 使用 Markdown 格式。
-        3. 包含：【核心结论】、【详细动态分析】、【相关链接】。
-        """
-        
-        # 流式输出
-        stream = client.chat.completions.create(
-            model="deepseek-chat",
-            messages=[
-                {"role": "system", "content": system_prompt},
-                {"role": "user", "content": f"分析主题：{user_query}"}
-            ],
-            stream=True
-        )
-        
-        status_box.update(label="✅ 研报生成完毕", state="complete", expanded=False)
-        
-        # 实时打印
-        report_placeholder = st.empty()
+        # 实时打印最终报告
+        response_stream = step_3_write(user_input, raw_data)
+        placeholder = st.empty()
         full_text = ""
-        for chunk in stream:
+        for chunk in response_stream:
             if chunk.choices[0].delta.content:
                 full_text += chunk.choices[0].delta.content
-                report_placeholder.markdown(full_text + "▌")
-        report_placeholder.markdown(full_text)
+                placeholder.markdown(full_text + "▌")
+        placeholder.markdown(full_text)
