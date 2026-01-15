@@ -2,11 +2,12 @@ import streamlit as st
 from openai import OpenAI
 from tavily import TavilyClient
 import json
+import concurrent.futures # 用于并行加速
 
 # ==========================================
-# 1. 配置区
+# 1. 基础配置
 # ==========================================
-st.set_page_config(page_title="Deep Research 深度反思版", page_icon="🤔", layout="wide")
+st.set_page_config(page_title="DeepSeek 终极全知者", page_icon="🧿", layout="wide")
 
 deepseek_key = st.secrets.get("DEEPSEEK_API_KEY")
 tavily_key = st.secrets.get("TAVILY_API_KEY")
@@ -19,87 +20,96 @@ client = OpenAI(api_key=deepseek_key, base_url="https://api.deepseek.com")
 tavily = TavilyClient(api_key=tavily_key)
 
 # ==========================================
-# 2. 定义 SOP (增加了反思环节)
+# 2. 核心大脑 (Function Calls)
 # ==========================================
 
-def step_1_plan(query):
-    """ 策划：拆解搜索意图 """
+def step_1_expert_planning(query):
+    """ 谋士：把傻瓜问题转化为 3 个专家级搜索词 """
     prompt = f"""
-    目标：彻底调研 "{query}"。
-    请生成 3 个互补的搜索关键词，确保覆盖不同视角。
-    输出格式：JSON {{ "queries": ["词1", "词2", "词3"] }}
+    你是一个顶级情报官。用户的问题是："{query}"。
+    为了得到最深度的结论，我们不能只搜表面。
+    请设计 3 个【互不重叠】、【极具穿透力】的搜索关键词（Query）。
+    
+    思路方向：
+    1. 核心事实与数据 (Data)
+    2. 幕后黑手与利益链 (Stakeholders)
+    3. 行业内的反对声音 (Contrarian Views)
+    
+    输出严格的 JSON 格式：
+    {{
+        "queries": ["搜索词1", "搜索词2", "搜索词3"],
+        "reasoning": "一句话解释为什么这么搜"
+    }}
     """
     response = client.chat.completions.create(
         model="deepseek-chat",
         messages=[{"role": "user", "content": prompt}],
         response_format={"type": "json_object"}
     )
-    return json.loads(response.choices[0].message.content)['queries']
+    return json.loads(response.choices[0].message.content)
 
-def step_2_search(queries):
-    """ 执行：Tavily 搜索 """
-    context = ""
+def step_2_parallel_search(queries):
+    """ 猎手：并行执行搜索 (速度最快) """
+    aggregated_context = ""
     logs = []
-    for q in queries:
+    
+    # 定义单个搜索任务
+    def fetch_one(q):
         try:
-            res = tavily.search(query=q, search_depth="advanced", max_results=3)
-            logs.append(f"✅ 搜索成功：{q}")
-            for item in res['results']:
-                context += f"【来源：{item['url']}】\n内容：{item['content']}\n\n"
+            # 这里的 max_results 设为 4，保证资料丰富度
+            res = tavily.search(query=q, search_depth="advanced", max_results=4)
+            return q, res['results']
         except Exception as e:
-            logs.append(f"❌ 搜索失败：{q} ({e})")
-    return context, logs
+            return q, []
 
-def step_3_draft(query, context):
-    """ 初稿：Writer 角色 """
+    # 并行线程池 (同时发 3 个请求，不用等)
+    with concurrent.futures.ThreadPoolExecutor() as executor:
+        futures = [executor.submit(fetch_one, q) for q in queries]
+        for future in concurrent.futures.as_completed(futures):
+            q, results = future.result()
+            logs.append(f"✅ 已抓取：{q} ({len(results)} 篇)")
+            for item in results:
+                aggregated_context += f"---来源：{q}---\n标题：{item['title']}\n内容：{item['content']}\n\n"
+    
+    return aggregated_context, logs
+
+def step_3_deep_analyze(dimension, context):
+    """ 榨汁机：单点透视分析 """
     prompt = f"""
-    你是初级研究员。基于资料写一份报告草稿。
-    课题：{query}
-    资料：
+    基于以下资料，撰写【{dimension}】的深度分析片段。
+    
+    资料库：
     {context}
-    要求：逻辑通顺，覆盖资料点。
+    
+    要求：
+    1. 像法医一样剖析细节。
+    2. 必须引用资料中的具体数据或观点。
+    3. 如果资料里没有，就说“证据不足”。
     """
     res = client.chat.completions.create(
         model="deepseek-chat",
         messages=[{"role": "user", "content": prompt}],
-        stream=False
+        temperature=0.5
     )
     return res.choices[0].message.content
 
-def step_4_critique(query, draft):
-    """ 批评：Critic 角色 (毒舌模式) """
+def step_4_final_report(query, analyses):
+    """ 最终报告生成 """
     prompt = f"""
-    你是严厉的主编。请评审这篇草稿。
-    课题：{query}
-    草稿内容：
-    {draft}
+    用户问题："{query}"
     
-    请列出 3 个具体的修改意见（Critique），要求：
-    1. 指出逻辑漏洞。
-    2. 指出不够深度的地方。
-    3. 指出语言啰嗦的地方。
-    不要重写，只给意见。
-    """
-    res = client.chat.completions.create(
-        model="deepseek-chat",
-        messages=[{"role": "user", "content": prompt}],
-        stream=False
-    )
-    return res.choices[0].message.content
-
-def step_5_refine(query, draft, critique):
-    """ 定稿：Refiner 角色 (根据意见重写) """
-    prompt = f"""
-    你是资深分析师。请根据【修改意见】重写这篇报告。
+    我们已经完成了全维度的深度调查：
+    【维度1：事实核查】{analyses['facts']}
+    【维度2：利益博弈】{analyses['interests']}
+    【维度3：盲点揭示】{analyses['blindspots']}
     
-    用户课题：{query}
-    原草稿：{draft}
-    【修改意见】：{critique}
-    
-    任务：
-    1. 吸纳修改意见，大幅提升文章深度。
-    2. 使用Markdown格式，包含层级标题。
-    3. 像专业研报一样严谨。
+    请以此写出一份**史诗级**的深度研究报告。
+    结构：
+    1. 🛡️ **执行摘要** (TL;DR)
+    2. 🔍 **深层真相还原**
+    3. ⚔️ **各方利益博弈**
+    4. ⚠️ **关键风险与盲点**
+    5. 🧠 **最终结论**
     """
     return client.chat.completions.create(
         model="deepseek-chat",
@@ -111,51 +121,68 @@ def step_5_refine(query, draft, critique):
 # 3. 页面 UI
 # ==========================================
 with st.sidebar:
-    st.header("🤔 自省式 Agent")
-    st.markdown("原理：\n1. 搜索 (Tavily)\n2. 初稿 (Writer)\n3. **批判 (Critic)**\n4. **精修 (Refiner)**")
+    st.header("🧿 全知者 (Level 9)")
+    st.markdown("""
+    **核心机制：**
+    1. **谋划**：将问题拆解为 3 个专家视角。
+    2. **狩猎**：并行抓取全网数据 (3x Tavily)。
+    3. **解剖**：3 维深度压榨 (3x DeepSeek)。
+    4. **重构**：合成史诗级报告。
+    """)
+    st.warning("⚠️ 此模式消耗较大：\n- 每次消耗 3 次搜索额度\n- 消耗约 10k+ DeepSeek Token")
 
-st.title("🤔 Deep Research: Self-Reflection Mode")
-st.caption("Level 7: The agent that critiques itself.")
+st.title("🧿 DeepSeek Oracle (终极全知者)")
+st.caption("Level 9: The Perfect Marriage of Search & Reasoning")
 
-user_input = st.chat_input("请输入深度研究课题...")
+user_input = st.chat_input("请输入一个值得动用核武器的问题...")
 
 if user_input:
     st.chat_message("user").write(user_input)
     
     with st.chat_message("assistant"):
-        # 状态容器
-        with st.status("🚀 启动深度思维链...", expanded=True) as status:
+        with st.status("🚀 全知者系统启动...", expanded=True) as status:
             
-            # Step 1: 拆解
-            status.write("🧠 1. 正在拆解问题 (Planning)...")
-            qs = step_1_plan(user_input)
-            status.write(f"👉 搜索方向：{qs}")
+            # --- Phase 1: 谋划 ---
+            status.write("🧠 1. 正在召开作战会议 (Query Planning)...")
+            plan = step_1_expert_planning(user_input)
+            st.info(f"**专家策略**：{plan['reasoning']}")
+            st.json(plan['queries'])
             
-            # Step 2: 搜索 (最贵的步骤，只做一次)
-            status.write("🌍 2. 正在并行挖掘资料 (Searching)...")
-            raw_data, logs = step_2_search(qs)
-            for log in logs: status.write(log)
+            # --- Phase 2: 狩猎 ---
+            status.write("🌍 2. 正在全球并行搜集情报 (Parallel Searching)...")
+            # 这里虽然搜了3次，但为了质量是值得的。
+            raw_context, search_logs = step_2_parallel_search(plan['queries'])
+            for log in search_logs:
+                status.write(log)
+            status.write(f"📦 情报库构建完成 (共 {len(raw_context)} 字符)")
             
-            # Step 3: 初稿 (便宜的 DeepSeek 思考)
-            status.write("📝 3. 正在撰写初稿 (Drafting)...")
-            draft_text = step_3_draft(user_input, raw_data)
-            with st.expander("查看初稿 (点击展开)"):
-                st.markdown(draft_text)
+            # --- Phase 3: 解剖 (压榨) ---
+            status.write("🔪 3. 正在进行手术刀式分析 (Deep Analysis)...")
+            analyses = {}
             
-            # Step 4: 自我批评 (核心升级点)
-            status.write("🧐 4. 正在进行深度反思 (Critiquing)...")
-            critique_text = step_4_critique(user_input, draft_text)
-            st.info(f"**AI 的自我批评意见：**\n{critique_text}")
+            col1, col2, col3 = st.columns(3)
+            with col1:
+                st.caption("事实核查中...")
+                analyses['facts'] = step_3_deep_analyze("核心事实与数据交叉验证", raw_context)
+                st.success("事实核查完成")
+            with col2:
+                st.caption("利益分析中...")
+                analyses['interests'] = step_3_deep_analyze("幕后利益链与商业动机", raw_context)
+                st.success("利益分析完成")
+            with col3:
+                st.caption("盲点扫描中...")
+                analyses['blindspots'] = step_3_deep_analyze("主流叙事的漏洞与反对声音", raw_context)
+                st.success("盲点扫描完成")
             
-            # Step 5: 最终润色
-            status.write("✍️ 5. 正在根据意见重写 (Refining)...")
-            status.update(label="✅ 深度研报完成", state="complete", expanded=False)
+            status.update(label="✅ 深度报告生成中...", state="running", expanded=False)
 
-        # 实时打印最终结果
-        final_stream = step_5_refine(user_input, draft_text, critique_text)
+        # --- Phase 4: 终局 ---
+        st.divider()
+        report_stream = step_4_final_report(user_input, analyses)
+        
         placeholder = st.empty()
         full_text = ""
-        for chunk in final_stream:
+        for chunk in report_stream:
             if chunk.choices[0].delta.content:
                 full_text += chunk.choices[0].delta.content
                 placeholder.markdown(full_text + "▌")
