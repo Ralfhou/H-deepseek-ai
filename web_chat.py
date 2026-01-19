@@ -3,12 +3,14 @@ from openai import OpenAI
 from tavily import TavilyClient
 import json
 import concurrent.futures
-import datetime  # 👈 核心补丁：引入时间感知
+import datetime
+from docx import Document  # 👈 新增：处理 Word 文档
+from io import BytesIO     # 👈 新增：在内存中处理文件
 
 # ==========================================
 # 1. 基础配置
 # ==========================================
-st.set_page_config(page_title="DeepSeek 终极全知者 (Pro)", page_icon="🧿", layout="wide")
+st.set_page_config(page_title="DeepSeek 研报生成器 (Level 10)", page_icon="🖨️", layout="wide")
 
 deepseek_key = st.secrets.get("DEEPSEEK_API_KEY")
 tavily_key = st.secrets.get("TAVILY_API_KEY")
@@ -21,32 +23,19 @@ client = OpenAI(api_key=deepseek_key, base_url="https://api.deepseek.com")
 tavily = TavilyClient(api_key=tavily_key)
 
 # ==========================================
-# 2. 核心大脑 (Function Calls) - 已打时效性补丁
+# 2. 核心大脑 (Level 9 的逻辑)
 # ==========================================
 
 def step_1_expert_planning(query):
-    """ 谋士：注入时间感知，强制搜索最新信息 """
-    # 获取当前日期
+    """ 谋士：注入时间感知 """
     today = datetime.datetime.now().strftime("%Y-%m-%d")
-    
     prompt = f"""
-    你是一个对【最新前沿动态】极其敏感的顶级情报官。
-    今天是：{today}。
-    
-    用户的问题是："{query}"。
-    
-    任务：设计 3 个【互不重叠】、【极具穿透力】的搜索关键词。
-    
-    ⚠️ 核心原则 (必须遵守)：
-    1. **拒绝过时信息**：用户非常反感 1 年前的旧闻。如果涉及科技/金融，必须优先关注【最近 1 个月】的动态。
-    2. **拒绝死板定义**：对于类似 FSD、AI 模型等话题，不要搜“什么是xx”，要搜“xx 最新评测”或“xx 实际能力”。
-    3. **包含时间锚点**：搜索词里尽量包含年份（如 2025, 2026）或最新版本号（如 v13, latest）。
-    
-    输出严格的 JSON 格式：
-    {{
-        "queries": ["搜索词1", "搜索词2", "搜索词3"],
-        "reasoning": "一句话解释为什么这么搜"
-    }}
+    今天是：{today}。用户问题："{query}"。
+    请设计 3 个【互不重叠】的搜索关键词。
+    要求：
+    1. 关注最新动态（包含年份或版本号）。
+    2. 拒绝死板定义。
+    输出 JSON: {{ "queries": ["词1", "词2", "词3"], "reasoning": "理由" }}
     """
     response = client.chat.completions.create(
         model="deepseek-chat",
@@ -56,20 +45,17 @@ def step_1_expert_planning(query):
     return json.loads(response.choices[0].message.content)
 
 def step_2_parallel_search(queries):
-    """ 猎手：并行执行搜索 (速度最快) """
+    """ 猎手：并行搜索 """
     aggregated_context = ""
     logs = []
     
-    # 定义单个搜索任务
     def fetch_one(q):
         try:
-            # max_results 设为 5，确保抓取足够的最新文章
             res = tavily.search(query=q, search_depth="advanced", max_results=5)
             return q, res['results']
-        except Exception as e:
+        except:
             return q, []
 
-    # 并行线程池
     with concurrent.futures.ThreadPoolExecutor() as executor:
         futures = [executor.submit(fetch_one, q) for q in queries]
         for future in concurrent.futures.as_completed(futures):
@@ -77,21 +63,14 @@ def step_2_parallel_search(queries):
             logs.append(f"✅ 已抓取：{q} ({len(results)} 篇)")
             for item in results:
                 aggregated_context += f"---来源：{q}---\n标题：{item['title']}\n内容：{item['content']}\n\n"
-    
     return aggregated_context, logs
 
 def step_3_deep_analyze(dimension, context):
-    """ 榨汁机：单点透视分析 """
+    """ 榨汁机：分析 """
     prompt = f"""
-    基于以下资料，撰写【{dimension}】的深度分析片段。
-    
-    资料库：
-    {context}
-    
-    要求：
-    1. 像法医一样剖析细节，寻找魔鬼细节。
-    2. 必须引用资料中的具体数据或观点。
-    3. 如果资料里没有，就说“证据不足”。
+    基于资料库，撰写【{dimension}】的深度分析。
+    资料库：{context}
+    要求：引用具体数据，分析透彻。
     """
     res = client.chat.completions.create(
         model="deepseek-chat",
@@ -101,31 +80,17 @@ def step_3_deep_analyze(dimension, context):
     return res.choices[0].message.content
 
 def step_4_final_report(query, analyses):
-    """ 最终报告：强制进行时效性辨析与反教条 """
+    """ 最终报告生成 """
     today = datetime.datetime.now().strftime("%Y-%m-%d")
-    
     prompt = f"""
-    今天是 {today}。
-    用户问题："{query}"
+    今天是 {today}。用户问题："{query}"
+    资料：【事实】{analyses['facts']} 【利益】{analyses['interests']} 【盲点】{analyses['blindspots']}
     
-    你手头有最新的深度调查资料：
-    【事实】：{analyses['facts']}
-    【利益】：{analyses['interests']}
-    【盲点】：{analyses['blindspots']}
-    
-    请写一份**极具时效性**的深度研究报告。
-    
-    ⚠️ 特别指令 (反幻觉补丁)：
-    1. **辨析“定义”与“现实”**：如果用户的认知（如 FSD 强于 L2）与官方/法律定义（L2）有冲突，请在报告中专门分析“法律滞后于技术”的现象，不要死板地照抄定义。
-    2. **数据优先**：尽量引用资料中的最新版本号（如 v12.5, v13）、最新日期。
-    3. **结论犀利**：不要模棱两可，要给出基于最新事实的判断。
-    
-    结构建议：
-    1. 🛡️ **执行摘要** (包含最新时间节点的结论)
-    2. 🔍 **现状与定义之争** (专门解释“为何官方说是A，实际体验是B”)
-    3. ⚔️ **各方利益博弈**
-    4. ⚠️ **未来风险与盲点**
-    5. 🧠 **最终结论**
+    请写一份**结构化**的深度研报。
+    格式要求：
+    - 不要使用 ```markdown 标记，直接输出内容。
+    - 使用 # 一级标题, ## 二级标题 等标准格式。
+    - 包含：1. 核心摘要 2. 深度分析 3. 风险提示 4. 结论。
     """
     return client.chat.completions.create(
         model="deepseek-chat",
@@ -134,70 +99,97 @@ def step_4_final_report(query, analyses):
     )
 
 # ==========================================
-# 3. 页面 UI
+# 3. 新增功能：打印机 (生成 Word)
+# ==========================================
+def generate_docx(topic, content):
+    """ 将 Markdown 文本转换为 Word 文档 """
+    doc = Document()
+    
+    # 添加标题
+    doc.add_heading(f'深度研报：{topic}', 0)
+    doc.add_paragraph(f'生成时间：{datetime.datetime.now().strftime("%Y-%m-%d %H:%M")}')
+    
+    # 简单处理 Markdown (将 # 转换为 Word 标题)
+    for line in content.split('\n'):
+        line = line.strip()
+        if line.startswith('# '):
+            doc.add_heading(line[2:], level=1)
+        elif line.startswith('## '):
+            doc.add_heading(line[3:], level=2)
+        elif line.startswith('### '):
+            doc.add_heading(line[4:], level=3)
+        elif line.startswith('- ') or line.startswith('* '):
+            doc.add_paragraph(line[2:], style='List Bullet')
+        else:
+            if line: # 跳过空行
+                doc.add_paragraph(line)
+                
+    # 保存到内存 (不存硬盘，适合云端)
+    bio = BytesIO()
+    doc.save(bio)
+    bio.seek(0)
+    return bio
+
+# ==========================================
+# 4. 页面 UI
 # ==========================================
 with st.sidebar:
-    st.header("🧿 全知者 (Level 9 Pro)")
-    st.markdown("""
-    **Pro 版特性：**
-    1. **时效增强**：自动注入当前日期，拒绝旧闻。
-    2. **反教条**：强制辨析“官方定义”与“实际能力”。
-    3. **并行加速**：3x 并行搜索 + 3x 深度分析。
-    """)
-    st.info(f"📅 当前系统时间：{datetime.datetime.now().strftime('%Y-%m-%d')}")
+    st.header("🖨️ Level 10: Publisher")
+    st.markdown("现在，你的 Agent 可以直接**交付结果**了。")
 
-st.title("🧿 DeepSeek Oracle (终极全知者 Pro)")
-st.caption("Level 9 Pro: Real-time, Anti-Dogma, Deep Reasoning")
+st.title("🖨️ DeepSeek 深度研报生成器")
+st.caption("Level 10: Auto-generate & Download Word Reports")
 
-user_input = st.chat_input("请输入一个需要【最新】且【深度】解读的问题...")
+user_input = st.chat_input("请输入调研主题...")
 
 if user_input:
     st.chat_message("user").write(user_input)
     
+    # 初始化完整报告内容的容器
+    full_report_text = ""
+    
     with st.chat_message("assistant"):
-        with st.status("🚀 全知者系统启动 (时效模式)...", expanded=True) as status:
-            
-            # --- Phase 1: 谋划 ---
-            status.write("🧠 1. 正在制定最新情报搜集策略 (Planning)...")
+        with st.status("🚀 正在生成交付级报告...", expanded=True) as status:
+            # Phase 1
+            status.write("🧠 1. 策划中...")
             plan = step_1_expert_planning(user_input)
-            st.info(f"**专家策略**：{plan['reasoning']}")
-            st.json(plan['queries'])
             
-            # --- Phase 2: 狩猎 ---
-            status.write("🌍 2. 正在全球并行搜集最新动态 (Searching)...")
-            raw_context, search_logs = step_2_parallel_search(plan['queries'])
-            for log in search_logs:
-                status.write(log)
-            status.write(f"📦 情报库构建完成 (共 {len(raw_context)} 字符)")
+            # Phase 2
+            status.write("🌍 2. 全网搜集中...")
+            raw_context, _ = step_2_parallel_search(plan['queries'])
             
-            # --- Phase 3: 解剖 (压榨) ---
-            status.write("🔪 3. 正在进行手术刀式分析 (Deep Analysis)...")
-            analyses = {}
+            # Phase 3
+            status.write("🔪 3. 深度分析中...")
+            analyses = {
+                'facts': step_3_deep_analyze("事实与数据", raw_context),
+                'interests': step_3_deep_analyze("利益博弈", raw_context),
+                'blindspots': step_3_deep_analyze("盲点与争议", raw_context)
+            }
             
-            col1, col2, col3 = st.columns(3)
-            with col1:
-                st.caption("事实核查中...")
-                analyses['facts'] = step_3_deep_analyze("核心事实与最新数据", raw_context)
-                st.success("事实核查完成")
-            with col2:
-                st.caption("利益分析中...")
-                analyses['interests'] = step_3_deep_analyze("幕后利益链与商业动机", raw_context)
-                st.success("利益分析完成")
-            with col3:
-                st.caption("盲点扫描中...")
-                analyses['blindspots'] = step_3_deep_analyze("官方定义与实际体验的脱节", raw_context)
-                st.success("盲点扫描完成")
+            status.update(label="✅ 分析完成，正在撰写...", state="running")
             
-            status.update(label="✅ 深度报告生成中...", state="running", expanded=False)
-
-        # --- Phase 4: 终局 ---
-        st.divider()
+        # Phase 4: 流式输出 + 记录全文
+        st.subheader(f"📄 {user_input} - 研报预览")
         report_stream = step_4_final_report(user_input, analyses)
         
         placeholder = st.empty()
-        full_text = ""
         for chunk in report_stream:
             if chunk.choices[0].delta.content:
-                full_text += chunk.choices[0].delta.content
-                placeholder.markdown(full_text + "▌")
-        placeholder.markdown(full_text)
+                text_chunk = chunk.choices[0].delta.content
+                full_report_text += text_chunk
+                placeholder.markdown(full_report_text + "▌")
+        placeholder.markdown(full_report_text)
+        
+        # Phase 5: 提供下载按钮
+        st.divider()
+        st.success("🎉 报告已生成！")
+        
+        # 调用 Word 生成函数
+        docx_file = generate_docx(user_input, full_report_text)
+        
+        st.download_button(
+            label="📥 下载 Word 格式研报 (.docx)",
+            data=docx_file,
+            file_name=f"{user_input}_深度研报.docx",
+            mime="application/vnd.openxmlformats-officedocument.wordprocessingml.document"
+        )

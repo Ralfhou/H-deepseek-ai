@@ -2,3 +2,4 @@ streamlit
 openai
 tavily-python
 pandas
+python-docx
