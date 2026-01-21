@@ -4,3 +4,4 @@ tavily-python
 pandas
 python-docx
 pypdf
+python-pptx
