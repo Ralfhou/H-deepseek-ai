@@ -153,22 +153,23 @@ if user_input := st.chat_input("请输入调研方向，或者针对已有报告
     with st.chat_message("assistant"):
         
         # 模式一：如果还没有报告，先做【深度调研】
+# 模式一：如果还没有报告，先做【深度调研】
         if not st.session_state.has_report:
-            status_container = st.status("🚀 正在进行首次深度调研...", expanded=True)
+            with st.status("🚀 正在进行首次深度调研...", expanded=True) as status:  # ✅ 改成这样
+                
+                # Step 1: 策划
+                status.write("🧠 策划搜索方案...")
+                plan = step_1_trend_planning(user_input, local_text)
+                
+                # Step 2: 搜索
+                status.write(f"🌍 全网检索: {plan['queries']}...")
+                web_context = step_2_global_search(plan['queries'])
+                
+                # Step 3: 写作
+                status.update(label="✍️ 正在生成深度研报...", state="running")
+                report_stream = step_3_trend_report(user_input, web_context, local_text)
             
-            # Step 1: 策划
-            status.write("🧠 策划搜索方案...")
-            plan = step_1_trend_planning(user_input, local_text)
-            
-            # Step 2: 搜索
-            status.write(f"🌍 全网检索: {plan['queries']}...")
-            web_context = step_2_global_search(plan['queries'])
-            
-            # Step 3: 写作
-            status.update(label="✍️ 正在生成深度研报...", state="running")
-            report_stream = step_3_trend_report(user_input, web_context, local_text)
-            
-            # 流式输出
+            # 流式输出 (注意缩进要跳出 with st.status 的层级)
             full_response = ""
             placeholder = st.empty()
             for chunk in report_stream:
@@ -179,8 +180,6 @@ if user_input := st.chat_input("请输入调研方向，或者针对已有报告
             
             # 标记状态：已有报告
             st.session_state.has_report = True
-            # 将“搜索到的上下文”也隐式存入历史，或者直接依赖报告内容
-            # 这里为了省 token，我们只存报告内容，DeepSeek 会基于报告回答
             
             # 提供下载
             docx = generate_docx(full_response)
