@@ -1,19 +1,18 @@
 import streamlit as st
 from openai import OpenAI
 from tavily import TavilyClient
-import pandas as pd
 import json
 import concurrent.futures
 import datetime
 from docx import Document
 from io import BytesIO
 from pypdf import PdfReader
-import matplotlib.pyplot as plt
+import pandas as pd
 
 # ==========================================
 # 1. 基础配置
 # ==========================================
-st.set_page_config(page_title="DeepSeek 数据分析师 (Level 13)", page_icon="📈", layout="wide")
+st.set_page_config(page_title="DeepSeek 全球前沿哨兵 (Level 14)", page_icon="🔭", layout="wide")
 
 deepseek_key = st.secrets.get("DEEPSEEK_API_KEY")
 tavily_key = st.secrets.get("TAVILY_API_KEY")
@@ -26,140 +25,227 @@ client = OpenAI(api_key=deepseek_key, base_url="https://api.deepseek.com")
 tavily = TavilyClient(api_key=tavily_key)
 
 # ==========================================
-# 2. 工具函数：读取文件 (支持 PDF 和 Excel)
+# 2. 全能文件读取器 (核心升级)
 # ==========================================
-def read_file(uploaded_file):
+def read_any_file(uploaded_file):
+    """ 支持 PDF, Word, TXT, Excel, CSV """
     file_type = uploaded_file.name.split('.')[-1].lower()
+    text_content = ""
     
-    if file_type == 'pdf':
-        try:
+    try:
+        if file_type == 'pdf':
             pdf = PdfReader(uploaded_file)
-            text = ""
             for page in pdf.pages:
-                text += page.extract_text() + "\n"
-            return "text", text[:20000]
-        except:
-            return "error", "PDF 读取失败"
+                text_content += page.extract_text() + "\n"
+                
+        elif file_type in ['docx', 'doc']:
+            doc = Document(uploaded_file)
+            text_content = "\n".join([p.text for p in doc.paragraphs])
             
-    elif file_type in ['xlsx', 'csv']:
-        try:
-            if file_type == 'csv':
-                df = pd.read_csv(uploaded_file)
-            else:
-                df = pd.read_excel(uploaded_file)
-            return "dataframe", df
-        except:
-            return "error", "表格读取失败"
-    
-    return "error", "不支持的文件格式"
+        elif file_type in ['txt', 'md']:
+            text_content = uploaded_file.read().decode("utf-8")
+            
+        elif file_type in ['xlsx', 'xls']:
+            df = pd.read_excel(uploaded_file)
+            text_content = df.to_markdown(index=False) # 把表格转成 Markdown 文本
+            
+        elif file_type == 'csv':
+            df = pd.read_csv(uploaded_file)
+            text_content = df.to_markdown(index=False)
+            
+        else:
+            return "Error: 不支持的文件格式"
+            
+        return text_content[:30000] # 截取前 3万字，防止 Token 爆炸
+        
+    except Exception as e:
+        return f"读取出错: {str(e)}"
 
 # ==========================================
-# 3. 核心大脑：数据分析引擎 (Code Interpreter)
+# 3. 核心大脑：科技情报流
 # ==========================================
 
-def analyze_data_with_code(query, df):
+def step_1_trend_planning(query, local_context=""):
     """ 
-    让 DeepSeek 写 Python 代码来分析 DataFrame 
+    谋士：专门针对【趋势调研】的策划
     """
-    # 告诉 AI 数据的结构
-    df_info = df.head(3).to_markdown()
-    columns = list(df.columns)
+    today = datetime.datetime.now().strftime("%Y-%m-%d")
     
+    context_prompt = ""
+    if local_context:
+        context_prompt = f"【参考用户上传的内部资料】：\n{local_context[:800]}...\n请确保调研方向与上述资料有相关性或对比性。"
+
     prompt = f"""
-    你是一个 Python 数据分析专家。用户上传了一个 Pandas DataFrame (变量名为 `df`)。
+    你是一个【全球前沿科技情报官】。今天是 {today}。
+    用户希望调研："{query}"。
+    {context_prompt}
     
-    【数据预览】：
-    {df_info}
-    
-    【列名】：{columns}
-    
-    【用户需求】："{query}"
-    
-    请编写一段 Python 代码来满足用户的分析需求。
+    请制定 3 个【极具前瞻性】的搜索策略。
     
     要求：
-    1. 代码必须是可以执行的 Python 代码。
-    2. 如果需要画图，请使用 `matplotlib.pyplot` (别名 plt)。
-    3. **关键**：将最终的分析结论或图表对象赋值给一个叫 `result` 的变量。
-       - 如果是画图，`result = plt.gcf()`
-       - 如果是计算数字，`result = "计算结果是..."`
-       - 如果是筛选数据，`result = df_filtered`
-    4. 不要包含 ```python 标记，直接输出代码内容。
-    """
+    1. **全球视野**：必须包含英文搜索词（如 "State of AI 2025", "Latest LLM benchmarks"）。
+    2. **信源权威**：优先关注 arXiv, TechCrunch, VentureBeat, GitHub Trending 等源头。
+    3. **时效性**：必须包含 {today.split('-')[0]} 年的最新动态。
     
+    输出 JSON: {{ "queries": ["英文搜索词1", "中文搜索词2", "特定领域搜索词3"], "reasoning": "策划理由" }}
+    """
     response = client.chat.completions.create(
         model="deepseek-chat",
         messages=[{"role": "user", "content": prompt}],
-        temperature=0.0 # 代码必须严谨
+        response_format={"type": "json_object"}
     )
-    return response.choices[0].message.content.replace("```python", "").replace("```", "").strip()
+    return json.loads(response.choices[0].message.content)
+
+def step_2_global_search(queries):
+    """ 猎手：全球搜索 """
+    aggregated_context = ""
+    logs = []
+    
+    def fetch_one(q):
+        try:
+            # max_results 设为 5，保证信息量
+            res = tavily.search(query=q, search_depth="advanced", max_results=5)
+            return q, res['results']
+        except:
+            return q, []
+
+    with concurrent.futures.ThreadPoolExecutor() as executor:
+        futures = [executor.submit(fetch_one, q) for q in queries]
+        for future in concurrent.futures.as_completed(futures):
+            q, results = future.result()
+            logs.append(f"✅ 已检索：{q} ({len(results)} 条)")
+            for item in results:
+                aggregated_context += f"---Source: {q}---\nTitle: {item['title']}\nURL: {item['url']}\nContent: {item['content']}\n\n"
+    return aggregated_context, logs
+
+def step_3_trend_report(query, web_context, local_context=""):
+    """ 主笔：撰写深度趋势研报 """
+    today = datetime.datetime.now().strftime("%Y-%m-%d")
+    
+    local_data = ""
+    if local_context:
+        local_data = f"【内部背景资料】：\n{local_context}\n---------------------\n"
+
+    prompt = f"""
+    你是《麻省理工科技评论》风格的资深编辑。今天是 {today}。
+    
+    用户课题："{query}"
+    
+    {local_data}
+    
+    【全球情报库】：
+    {web_context}
+    
+    请撰写一份**深度行业趋势分析报告**。
+    
+    ⚠️ 写作要求：
+    1. **结构化**：必须包含【执行摘要】、【核心趋势解读】(至少3点)、【关键案例/数据】、【未来展望】。
+    2. **去废话**：不要写“随着AI的发展...”，直接给干货，比如“OpenAI 发布的 Sora 模型展示了...”。
+    3. **引用**：在文中适当位置标注数据来源。
+    4. **融合**：如果用户上传了内部资料，请对比“内部现状”与“外部趋势”的差距或机会。
+    5. **排版**：使用 Markdown H1, H2, H3, Bullet points。
+    """
+    
+    return client.chat.completions.create(
+        model="deepseek-chat",
+        messages=[{"role": "user", "content": prompt}],
+        stream=True
+    )
+
+def generate_docx(topic, content):
+    """ 生成精美的 Word 研报 """
+    doc = Document()
+    doc.add_heading(f'全球前沿科技研报：{topic}', 0)
+    doc.add_paragraph(f'生成日期：{datetime.datetime.now().strftime("%Y-%m-%d")}')
+    doc.add_paragraph('Report generated by DeepSeek AI Scout')
+    
+    for line in content.split('\n'):
+        line = line.strip()
+        if not line: continue
+        
+        if line.startswith('# '): 
+            doc.add_heading(line[2:], level=1)
+        elif line.startswith('## '): 
+            doc.add_heading(line[3:], level=2)
+        elif line.startswith('### '): 
+            doc.add_heading(line[4:], level=3)
+        elif line.startswith('- ') or line.startswith('* '): 
+            doc.add_paragraph(line[2:], style='List Bullet')
+        elif line.startswith('1. '): 
+            doc.add_paragraph(line[3:], style='List Number')
+        else: 
+            doc.add_paragraph(line)
+            
+    bio = BytesIO()
+    doc.save(bio)
+    bio.seek(0)
+    return bio
 
 # ==========================================
 # 4. 页面 UI
 # ==========================================
 with st.sidebar:
-    st.header("📈 Level 13: Data Analyst")
-    uploaded_file = st.file_uploader("📂 上传资料 (PDF / Excel / CSV)", type=["pdf", "xlsx", "csv"])
+    st.header("🔭 哨兵控制台")
+    st.markdown("支持上传：PDF, Word, TXT, Excel")
     
-    data_context = None
-    data_type = None
+    uploaded_file = st.file_uploader("📂 投喂背景资料 (可选)", type=["pdf", "docx", "txt", "md", "xlsx", "csv"])
+    local_text = ""
     
     if uploaded_file:
-        data_type, data_context = read_file(uploaded_file)
-        if data_type == "dataframe":
-            st.success("✅ 表格加载成功！")
-            st.dataframe(data_context.head(5)) # 预览前5行
-        elif data_type == "text":
-            st.success(f"✅ 文档加载成功 ({len(data_context)} 字)")
+        with st.spinner("正在解析文件内容..."):
+            local_text = read_any_file(uploaded_file)
+        if local_text.startswith("Error"):
+            st.error(local_text)
+        else:
+            st.success(f"✅ 已提取 {len(local_text)} 字符")
+            with st.expander("查看提取内容"):
+                st.text(local_text[:800] + "...")
 
-st.title("📈 DeepSeek 智能数据分析师")
-st.caption("Level 13: Talk to your Excel/CSV Data")
+st.title("🔭 DeepSeek 全球前沿科技哨兵")
+st.caption("Level 14: Global AI Trend Research & Reporting")
 
-user_input = st.chat_input("请输入指令 (例如：画出销售额随时间的变化趋势)...")
+user_input = st.chat_input("请输入调研方向 (例如：2026年 AI Agent 在金融领域的应用趋势)...")
 
 if user_input:
     st.chat_message("user").write(user_input)
     
+    full_report = ""
+    
     with st.chat_message("assistant"):
-        # 场景 A: 纯数据分析 (如果上传了表格)
-        if data_type == "dataframe":
-            df = data_context # 拿到数据
+        with st.status("🚀 启动全球侦察任务...", expanded=True) as status:
             
-            with st.status("💻 正在编写分析代码...", expanded=True) as status:
-                # 1. 让 AI 写代码
-                code = analyze_data_with_code(user_input, df)
-                st.code(code, language='python') # 展示 AI 写的代码
-                
-                # 2. 执行代码 (高危操作，但在本地很爽)
-                status.write("⚙️ 正在执行代码...")
-                try:
-                    local_vars = {"df": df, "plt": plt, "pd": pd}
-                    exec(code, {}, local_vars) # 执行！
-                    result = local_vars.get('result', '没有检测到 result 变量')
-                    
-                    status.update(label="✅ 分析完成", state="complete")
-                    
-                    # 3. 展示结果
-                    st.divider()
-                    st.write("### 📊 分析结果")
-                    
-                    # 如果结果是图表
-                    if hasattr(result, 'canvas'): 
-                        st.pyplot(result)
-                    # 如果结果是表格
-                    elif isinstance(result, pd.DataFrame):
-                        st.dataframe(result)
-                    # 其他文本结果
-                    else:
-                        st.write(result)
-                        
-                except Exception as e:
-                    status.update(label="❌ 代码执行出错", state="error")
-                    st.error(f"报错详情: {e}")
-                    
-        # 场景 B: 之前的混合搜索 (如果没有表格，或者只是PDF)
-        else:
-            st.info("💡 这是一个普通搜索/文档问答模式 (未检测到表格)")
-            # 这里保留之前的逻辑，简写一下，方便演示 Level 13 核心
-            # ... (你可以把 Level 11 的逻辑贴回来，或者专注于测试数据功能)
-            st.write("请上传 Excel 文件以体验 Level 13 的核心功能！")
+            # Step 1: 策划
+            status.write("🧠 1. 制定搜索策略 (Global Planning)...")
+            plan = step_1_trend_planning(user_input, local_text)
+            st.write(f"👉 策略：{plan['reasoning']}")
+            st.json(plan['queries'])
+            
+            # Step 2: 搜索
+            status.write("🌍 2. 检索全球情报 (Tavily Advanced)...")
+            web_context, logs = step_2_global_search(plan['queries'])
+            for log in logs: status.write(log)
+            
+            # Step 3: 撰写
+            status.update(label="✍️ 正在撰写深度研报...", state="running", expanded=False)
+            
+        st.subheader(f"📄 {user_input} - 深度趋势报告")
+        stream = step_3_trend_report(user_input, web_context, local_text)
+        
+        placeholder = st.empty()
+        for chunk in stream:
+            if chunk.choices[0].delta.content:
+                c = chunk.choices[0].delta.content
+                full_report += c
+                placeholder.markdown(full_report + "▌")
+        placeholder.markdown(full_report)
+        
+        st.divider()
+        
+        # 导出 Word
+        docx_file = generate_docx(user_input, full_report)
+        st.download_button(
+            label="📥 下载 Word 研报 (.docx)",
+            data=docx_file,
+            file_name=f"{user_input}_趋势研报.docx",
+            mime="application/vnd.openxmlformats-officedocument.wordprocessingml.document"
+        )
