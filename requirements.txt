@@ -4,4 +4,5 @@ tavily-python
 pandas
 python-docx
 pypdf
-python-pptx
+openpyxl
+matplotlib
