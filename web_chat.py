@@ -7,12 +7,11 @@ import datetime
 from docx import Document
 from io import BytesIO
 from pypdf import PdfReader
-import pandas as pd
 
 # ==========================================
 # 1. 基础配置
 # ==========================================
-st.set_page_config(page_title="DeepSeek 智能编辑部 (Level 16)", page_icon="🕵️", layout="wide")
+st.set_page_config(page_title="DeepSeek 导演剪辑版 (Level 17)", page_icon="🎬", layout="wide")
 
 deepseek_key = st.secrets.get("DEEPSEEK_API_KEY")
 tavily_key = st.secrets.get("TAVILY_API_KEY")
@@ -24,32 +23,13 @@ if not deepseek_key or not tavily_key:
 client = OpenAI(api_key=deepseek_key, base_url="https://api.deepseek.com")
 tavily = TavilyClient(api_key=tavily_key)
 
-# 初始化 Session State
+# --- 核心状态管理 ---
 if "messages" not in st.session_state: st.session_state.messages = []
-if "workflow_logs" not in st.session_state: st.session_state.workflow_logs = []
+if "current_report" not in st.session_state: st.session_state.current_report = "" # 存储当前版本的报告
+if "web_context" not in st.session_state: st.session_state.web_context = "" # 存储已搜集的情报
 
 # ==========================================
-# 2. 工具函数
-# ==========================================
-def read_any_file(uploaded_file):
-    """ 读取文件内容 """
-    file_type = uploaded_file.name.split('.')[-1].lower()
-    text_content = ""
-    try:
-        if file_type == 'pdf':
-            pdf = PdfReader(uploaded_file)
-            for page in pdf.pages: text_content += page.extract_text() + "\n"
-        elif file_type in ['docx', 'doc']:
-            doc = Document(uploaded_file)
-            text_content = "\n".join([p.text for p in doc.paragraphs])
-        elif file_type in ['txt', 'md']:
-            text_content = uploaded_file.read().decode("utf-8")
-        return text_content[:30000]
-    except Exception as e:
-        return f"Error: {str(e)}"
-
-# ==========================================
-# 3. 多智能体角色 (Agents)
+# 2. 智能体定义 (Agents)
 # ==========================================
 
 # --- Agent A: 策划 (Planner) ---
@@ -58,9 +38,9 @@ def agent_planner(query, local_context=""):
     prompt = f"""
     你是一个【主编策划】。今天是 {today}。
     用户选题："{query}"。
-    内部资料片段：{local_context[:500]}
+    内部资料：{local_context[:500]}
     
-    请制定 3 个搜索关键词，确保覆盖最新的行业动态和深度数据。
+    请制定 3 个搜索关键词，确保覆盖最新的行业动态。
     输出 JSON: {{ "queries": ["词1", "词2", "词3"] }}
     """
     response = client.chat.completions.create(
@@ -72,7 +52,7 @@ def agent_planner(query, local_context=""):
 
 # --- Agent B: 猎手 (Hunter) ---
 def agent_searcher(queries):
-    context = ""
+    new_context = ""
     def fetch(q):
         try:
             return tavily.search(query=q, search_depth="advanced", max_results=3)['results']
@@ -82,8 +62,8 @@ def agent_searcher(queries):
         futures = [executor.submit(fetch, q) for q in queries]
         for future in concurrent.futures.as_completed(futures):
             for item in future.result():
-                context += f"Source: {item['title']}\nContent: {item['content']}\n\n"
-    return context
+                new_context += f"Source: {item['title']}\nContent: {item['content']}\n\n"
+    return new_context
 
 # --- Agent C: 初稿主笔 (Writer) ---
 def agent_writer(query, context, local_data):
@@ -102,44 +82,43 @@ def agent_writer(query, context, local_data):
     )
     return response.choices[0].message.content
 
-# --- Agent D: 审稿人 (Critic) [核心新增!] ---
-def agent_critic(query, draft):
+# --- Agent D: 补救策划 (Replanner) [Level 17 新增] ---
+def agent_replanner(feedback, current_report):
+    """ 判断用户的反馈是否需要联网搜索 """
     prompt = f"""
-    你是一个【毒舌主编/审稿人】。
-    用户选题："{query}"
+    用户对报告提出了修改意见："{feedback}"
+    当前报告摘要：{current_report[:500]}...
     
-    这是下属写的初稿：
-    {draft[:10000]}
+    请判断：为了满足该意见，是否需要【去网上搜索新信息】？
+    - 如果是（例如“补充xx的数据”），请生成搜索词。
+    - 如果否（例如“改短一点”、“换个语气”），请返回空列表。
     
-    请用批判性的眼光审查这份初稿：
-    1. 有没有逻辑漏洞？
-    2. 是否缺少关键数据支持？
-    3. 观点是否过于平庸？
-    
-    请给出 3 条具体的【修改建议】（不要重写，只给建议）。
-    输出格式：
-    1. 建议一...
-    2. 建议二...
-    3. 建议三...
+    输出 JSON: {{ "needs_search": true/false, "queries": ["词1", "词2"] }}
     """
     response = client.chat.completions.create(
         model="deepseek-chat",
-        messages=[{"role": "user", "content": prompt}]
+        messages=[{"role": "user", "content": prompt}],
+        response_format={"type": "json_object"}
     )
-    return response.choices[0].message.content
+    return json.loads(response.choices[0].message.content)
 
-# --- Agent E: 终稿精修 (Editor) [核心新增!] ---
-def agent_editor(query, draft, critique):
+# --- Agent E: 精修/重写 (Editor) ---
+def agent_editor(query, draft, instructions, new_context=""):
     prompt = f"""
     你是一个【最终把关人】。
-    初稿：
-    {draft[:10000]}
     
-    主编的修改建议：
-    {critique}
+    【当前版本】：
+    {draft}
     
-    请根据建议，对初稿进行【重写和润色】，输出最终的完美版本。
-    直接输出最终内容，不要罗嗦。
+    【修改指令】：
+    {instructions}
+    
+    【新补充的搜索资料】(如果有)：
+    {new_context}
+    
+    请严格根据指令，对当前版本进行【重写/修订】。
+    如果有了新资料，请融合进去。
+    直接输出最终内容。
     """
     return client.chat.completions.create(
         model="deepseek-chat",
@@ -149,7 +128,7 @@ def agent_editor(query, draft, critique):
 
 def generate_docx(content):
     doc = Document()
-    doc.add_heading('DeepSeek 深度研报 (精修版)', 0)
+    doc.add_heading('DeepSeek 深度研报', 0)
     for line in content.split('\n'):
         if line.startswith('# '): doc.add_heading(line[2:], level=1)
         elif line.startswith('## '): doc.add_heading(line[3:], level=2)
@@ -159,76 +138,114 @@ def generate_docx(content):
     bio.seek(0)
     return bio
 
+def read_any_file(uploaded_file):
+    # (保持之前的逻辑不变)
+    try:
+        if uploaded_file.name.endswith('.pdf'):
+            pdf = PdfReader(uploaded_file)
+            return "".join([p.extract_text() for p in pdf.pages])[:30000]
+        else:
+            return uploaded_file.read().decode("utf-8")[:30000]
+    except: return ""
+
 # ==========================================
-# 4. 页面 UI
+# 3. 页面 UI
 # ==========================================
 with st.sidebar:
-    st.header("🕵️ 编辑部控制台")
-    uploaded_file = st.file_uploader("📂 资料投喂", type=["pdf", "docx", "txt"])
+    st.header("🎬 导演控制台")
+    uploaded_file = st.file_uploader("📂 资料投喂", type=["pdf", "txt"])
     local_text = ""
-    if uploaded_file:
-        local_text = read_any_file(uploaded_file)
-        st.success("资料已就位")
+    if uploaded_file: local_text = read_any_file(uploaded_file)
 
-    if st.button("🗑️ 清空工作流"):
+    if st.button("🗑️ 清空重来"):
+        st.session_state.current_report = ""
+        st.session_state.web_context = ""
         st.session_state.messages = []
         st.rerun()
 
-st.title("🕵️ DeepSeek 智能编辑部 (Multi-Agent)")
-st.caption("Level 16: Planner -> Searcher -> Writer -> Critic -> Editor")
+st.title("🎬 DeepSeek 智能编辑部 (人机协同版)")
+st.caption("Level 17: User Feedback Loop & Auto-Replanning")
 
-# 显示历史
+# 展示历史对话
 for msg in st.session_state.messages:
     with st.chat_message(msg["role"]):
         st.markdown(msg["content"])
 
-if user_input := st.chat_input("请输入调研选题..."):
-    
-    st.session_state.messages.append({"role": "user", "content": user_input})
-    with st.chat_message("user"):
-        st.write(user_input)
+# --- 主逻辑：如果还没有报告，显示主输入框 ---
+if not st.session_state.current_report:
+    if user_input := st.chat_input("请输入初始选题..."):
+        st.session_state.messages.append({"role": "user", "content": user_input})
+        with st.chat_message("user"): st.write(user_input)
 
-    with st.chat_message("assistant"):
-        # 使用 st.status 展示多智能体协作过程
-        with st.status("🚀 编辑部全员集结，开始工作...", expanded=True) as status:
-            
-            # 1. 策划
-            status.write("🧠 [策划] 正在制定搜索方案...")
-            plan = agent_planner(user_input, local_text)
-            st.json(plan['queries'])
-            
-            # 2. 搜索
-            status.write("🌍 [探员] 正在全球搜集情报...")
-            web_context = agent_searcher(plan['queries'])
-            
-            # 3. 初稿
-            status.write("✍️ [主笔] 正在撰写初稿 (Draft V1)...")
-            draft_v1 = agent_writer(user_input, web_context, local_text)
-            with st.expander("查看初稿 (Draft V1)"):
-                st.markdown(draft_v1)
-            
-            # 4. 审稿 (亮点步骤!)
-            status.write("⚖️ [主编] 正在进行严厉审稿...")
-            critique = agent_critic(user_input, draft_v1)
-            st.info(f"**主编意见**：\n{critique}")
-            
-            # 5. 精修
-            status.update(label="✨ [终审] 正在根据意见重写最终版...", state="running")
-            final_stream = agent_editor(user_input, draft_v1, critique)
-            
-            # 流式输出最终版
-            full_response = ""
-            placeholder = st.empty()
-            for chunk in final_stream:
-                if chunk.choices[0].delta.content:
-                    full_response += chunk.choices[0].delta.content
-                    placeholder.markdown(full_response + "▌")
-            placeholder.markdown(full_response)
-            
-            status.update(label="✅ 工作流执行完毕", state="complete", expanded=False)
+        with st.chat_message("assistant"):
+            with st.status("🚀 第一次全流程制作中...", expanded=True) as status:
+                # 1. 策划
+                status.write("🧠 [策划] 制定初始方案...")
+                plan = agent_planner(user_input, local_text)
+                
+                # 2. 搜索
+                status.write("🌍 [猎手] 全网搜索...")
+                web_ctx = agent_searcher(plan['queries'])
+                st.session_state.web_context = web_ctx # 保存到记忆
+                
+                # 3. 写作
+                status.write("✍️ [主笔] 撰写初稿...")
+                draft = agent_writer(user_input, web_ctx, local_text)
+                
+                status.update(label="✅ 初稿完成！请在下方提出修改意见", state="complete")
 
-    # 保存记忆
-    st.session_state.messages.append({"role": "assistant", "content": full_response})
+            # 显示初稿
+            st.markdown(draft)
+            st.session_state.messages.append({"role": "assistant", "content": draft})
+            st.session_state.current_report = draft
+            st.rerun() # 强制刷新，让界面进入“修改模式”
+
+# --- 修改逻辑：如果已有报告，显示“修改意见”输入框 ---
+else:
+    # 下载按钮常驻
+    st.download_button("📥 下载当前版本 (.docx)", generate_docx(st.session_state.current_report), "report.docx")
     
-    # 下载按钮
-    st.download_button("📥 下载精修研报", generate_docx(full_response), "final_report.docx")
+    # 修改意见输入框 (注意：这里不用 st.chat_input，改用 form 以便更清晰)
+    with st.form("revision_form"):
+        feedback = st.text_area("✍️ 导演指示 (对报告哪里不满意？)", placeholder="例如：给我在第二段补充一下 OpenAI 的最新数据...")
+        submitted = st.form_submit_button("🚀 提交修改指令")
+        
+    if submitted and feedback:
+        # 显示用户的修改指令
+        st.session_state.messages.append({"role": "user", "content": f"【修改指令】{feedback}"})
+        with st.chat_message("user"): st.write(f"【修改指令】{feedback}")
+        
+        with st.chat_message("assistant"):
+            with st.status("🔧 正在执行修改工作流...", expanded=True) as status:
+                
+                # 1. 决策：是否需要补搜？
+                status.write("🤔 [决策] 正在判断是否需要补搜资料...")
+                replan_result = agent_replanner(feedback, st.session_state.current_report)
+                
+                new_info = ""
+                if replan_result['needs_search']:
+                    status.write(f"🌍 [猎手] 发现信息缺口，正在补搜：{replan_result['queries']}")
+                    new_info = agent_searcher(replan_result['queries'])
+                    st.session_state.web_context += f"\n\n=== 补搜资料 ===\n{new_info}" # 追加到记忆
+                else:
+                    status.write("👌 [决策] 无需补搜，直接进行文本调整。")
+                
+                # 2. 精修
+                status.write("✨ [精修] 正在根据指示重写...")
+                # 注意：我们把 feedback 当作 instructions 传进去
+                stream = agent_editor(feedback, st.session_state.current_report, feedback, new_info)
+                
+                full_response = ""
+                placeholder = st.empty()
+                for chunk in stream:
+                    if chunk.choices[0].delta.content:
+                        full_response += chunk.choices[0].delta.content
+                        placeholder.markdown(full_response + "▌")
+                placeholder.markdown(full_response)
+                
+                # 更新状态
+                st.session_state.current_report = full_response
+                st.session_state.messages.append({"role": "assistant", "content": full_response})
+                status.update(label="✅ 修改完成", state="complete")
+        
+        st.rerun()
